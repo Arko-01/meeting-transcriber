@@ -42,12 +42,7 @@ type InMessage = LoadMessage | TranscribeMessage
 let transcriber: AutomaticSpeechRecognitionPipeline | null = null
 let loadingKey: string | null = null
 
-async function load(model: ModelId, device: Device) {
-  const key = `${model}:${device}`
-  if (transcriber && loadingKey === key) return
-  loadingKey = key
-  transcriber = null
-
+async function createPipeline(model: ModelId, device: Device) {
   // WebGPU runs the encoder best in fp32 and the decoder in a quantized dtype;
   // wasm uses int8 everywhere to keep memory + download small.
   const dtype =
@@ -55,7 +50,7 @@ async function load(model: ModelId, device: Device) {
       ? { encoder_model: 'fp32', decoder_model_merged: 'q4' }
       : { encoder_model: 'q8', decoder_model_merged: 'q8' }
 
-  transcriber = (await pipeline('automatic-speech-recognition', model, {
+  return (await pipeline('automatic-speech-recognition', model, {
     device,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     dtype: dtype as any,
@@ -63,8 +58,33 @@ async function load(model: ModelId, device: Device) {
       self.postMessage({ type: 'progress', payload: p })
     },
   })) as AutomaticSpeechRecognitionPipeline
+}
 
-  self.postMessage({ type: 'ready', model, device })
+async function load(model: ModelId, device: Device) {
+  const key = `${model}:${device}`
+  if (transcriber && loadingKey === key) return
+  loadingKey = key
+  transcriber = null
+
+  try {
+    transcriber = await createPipeline(model, device)
+    self.postMessage({ type: 'ready', model, device })
+  } catch (err) {
+    // `'gpu' in navigator` is true on many machines where requestAdapter()
+    // actually fails (Linux, blocklisted drivers, VMs). Fall back to CPU so
+    // the user gets working-if-slower transcription instead of a hard crash.
+    if (device === 'webgpu') {
+      self.postMessage({
+        type: 'fallback',
+        message: err instanceof Error ? err.message : String(err),
+      })
+      loadingKey = `${model}:wasm`
+      transcriber = await createPipeline(model, 'wasm')
+      self.postMessage({ type: 'ready', model, device: 'wasm' })
+    } else {
+      throw err
+    }
+  }
 }
 
 async function transcribe(msg: TranscribeMessage) {
