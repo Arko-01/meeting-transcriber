@@ -12,7 +12,12 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'prompt' makes a new service worker WAIT instead of silently swapping in,
+      // so we can show an "update available" toast and let the user reload. The
+      // app registers the SW itself via useRegisterSW(), so don't also inject a
+      // separate registration script.
+      registerType: 'prompt',
+      injectRegister: false,
       includeAssets: ['favicon.svg', 'icon.svg'],
       workbox: {
         // App shell only. Whisper model weights + ONNX runtime are streamed

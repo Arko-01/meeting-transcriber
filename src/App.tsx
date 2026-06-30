@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useRegisterSW } from 'virtual:pwa-register/react'
 import './App.css'
 import { AudioCapture, SAMPLE_RATE } from './audio'
 import type { Device, Language, ModelId } from './worker'
@@ -92,6 +93,18 @@ function highlight(text: string, q: string): ReactNode {
 }
 
 export default function App() {
+  // PWA update prompt — 'prompt' registration means a freshly-deployed service
+  // worker waits; we surface it as a toast and activate + reload on click.
+  const {
+    needRefresh: [needRefresh, setNeedRefresh],
+    updateServiceWorker,
+  } = useRegisterSW({
+    onRegisteredSW(_swUrl, registration) {
+      // Re-check for a new deploy hourly (on top of the on-navigation check).
+      if (registration) setInterval(() => void registration.update(), 60 * 60 * 1000)
+    },
+  })
+
   const [status, setStatus] = useState<Status>('idle')
   const [paused, setPaused] = useState(false)
   const [progress, setProgress] = useState<number | null>(null)
@@ -726,6 +739,19 @@ export default function App() {
           )}
         </div>
       </header>
+
+      {needRefresh && (
+        <div className="banner update" role="status">
+          <Refresh size={16} />
+          <span className="err-msg">A new version is available.</span>
+          <button className="link" onClick={() => void updateServiceWorker(true)}>
+            Reload
+          </button>
+          <button className="icon-btn" aria-label="Dismiss" onClick={() => setNeedRefresh(false)}>
+            <Close size={14} />
+          </button>
+        </div>
+      )}
 
       {restored && (
         <div className="banner info">

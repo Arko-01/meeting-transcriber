@@ -157,6 +157,16 @@
   color: #ffc2c8;
 }
 
+.banner.update {
+  background: rgba(56, 211, 159, 0.13);
+  border: 1px solid rgba(56, 211, 159, 0.45);
+  color: #bff3e0;
+}
+
+.banner.update .link {
+  color: #fff;
+}
+
 .banner .err-msg {
   flex: 1;
 }
