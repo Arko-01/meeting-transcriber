@@ -65,6 +65,85 @@ export function encodeWav(samples: Float32Array, sampleRate = 16000): Blob {
 
 export class CloudAuthError extends Error {}
 
+// --- AI summary (Groq free LLM) ---------------------------------------------
+const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions'
+// gpt-oss-120b is a current Groq production model (llama-3.3-70b was deprecated
+// mid-2026). Strong, fast, free-tier-friendly for summarization.
+const SUMMARY_MODEL = 'openai/gpt-oss-120b'
+const MAX_TRANSCRIPT_CHARS = 48000
+
+const SUMMARY_SYSTEM =
+  'You are a precise meeting-notes assistant. The transcript may mix English and Bangla and may contain transcription errors — infer intent. Be concise and faithful; never invent facts.'
+
+const SUMMARY_USER = (transcript: string) =>
+  `Summarize this meeting transcript using EXACTLY this Markdown structure:
+
+## Summary
+(2–3 sentences)
+
+## Key points
+- ...
+
+## Decisions
+- ... (write "None" if no decisions were made)
+
+## Action items
+- [ ] Owner — task and any deadline (write "None" if there are no action items)
+
+Write in English, but keep names and specific terms as spoken. Keep it tight.
+
+Transcript:
+${transcript}`
+
+// Returns Markdown notes. The transcript TEXT is sent to Groq (audio is not).
+export async function summarizeTranscript(opts: {
+  transcript: string
+  apiKey: string
+  signal?: AbortSignal
+}): Promise<string> {
+  let text = opts.transcript.trim()
+  if (!text) return ''
+  // Keep the most recent portion if the meeting is very long.
+  if (text.length > MAX_TRANSCRIPT_CHARS) text = '…' + text.slice(-MAX_TRANSCRIPT_CHARS)
+
+  let res: Response
+  try {
+    res = await fetch(GROQ_CHAT_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${opts.apiKey}`, 'Content-Type': 'application/json' },
+      signal: opts.signal,
+      body: JSON.stringify({
+        model: SUMMARY_MODEL,
+        temperature: 0.3,
+        max_tokens: 1300,
+        messages: [
+          { role: 'system', content: SUMMARY_SYSTEM },
+          { role: 'user', content: SUMMARY_USER(text) },
+        ],
+      }),
+    })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw err
+    throw new Error('Could not reach Groq (network or CORS). Check your connection.')
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    throw new CloudAuthError('Your Groq API key was rejected. Check it in settings.')
+  }
+  if (res.status === 429) {
+    throw new Error('Groq rate limit reached — wait a moment and try again.')
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`Summary failed (${res.status}): ${body.slice(0, 160)}`)
+  }
+
+  const json = (await res.json()) as { choices?: { message?: { content?: string } }[] }
+  const content = json.choices?.[0]?.message?.content?.trim()
+  if (!content) throw new Error('Groq returned an empty summary.')
+  return content
+}
+
 export async function transcribeCloud(opts: {
   audio: Float32Array
   apiKey: string

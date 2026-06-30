@@ -39,10 +39,18 @@ import {
   Play,
   Refresh,
   Search,
+  Sparkles,
   Stop,
   Trash,
 } from './icons'
-import { CloudAuthError, loadKey, saveKey, transcribeCloud, type CloudProvider } from './cloud'
+import {
+  CloudAuthError,
+  loadKey,
+  saveKey,
+  summarizeTranscript,
+  transcribeCloud,
+  type CloudProvider,
+} from './cloud'
 import { GladiaLive } from './gladia'
 
 // --- tuning -----------------------------------------------------------------
@@ -100,6 +108,62 @@ function highlight(text: string, q: string): ReactNode {
   return nodes
 }
 
+// Minimal Markdown renderer for the AI summary (just the structure we ask for:
+// ## headings, - bullets, - [ ] checkboxes, **bold**).
+function inlineMd(text: string): ReactNode {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
+    p.startsWith('**') && p.endsWith('**') ? <strong key={i}>{p.slice(2, -2)}</strong> : p,
+  )
+}
+
+function renderMarkdown(md: string): ReactNode {
+  const out: ReactNode[] = []
+  let bullets: ReactNode[] = []
+  let key = 0
+  const flush = () => {
+    if (bullets.length) {
+      out.push(
+        <ul key={key++} className="md-list">
+          {bullets}
+        </ul>,
+      )
+      bullets = []
+    }
+  }
+  for (const raw of md.split('\n')) {
+    const line = raw.trimEnd()
+    if (/^#{1,6}\s/.test(line)) {
+      flush()
+      out.push(
+        <h4 key={key++} className="md-h">
+          {line.replace(/^#{1,6}\s/, '')}
+        </h4>,
+      )
+    } else if (/^- \[[ xX]\]\s/.test(line)) {
+      const done = /^- \[[xX]\]/.test(line)
+      bullets.push(
+        <li key={key++} className="md-task">
+          <span className={`md-check ${done ? 'done' : ''}`} aria-hidden="true" />
+          {inlineMd(line.replace(/^- \[[ xX]\]\s/, ''))}
+        </li>,
+      )
+    } else if (/^[-*]\s/.test(line)) {
+      bullets.push(<li key={key++}>{inlineMd(line.replace(/^[-*]\s/, ''))}</li>)
+    } else if (line.trim() === '') {
+      flush()
+    } else {
+      flush()
+      out.push(
+        <p key={key++} className="md-p">
+          {inlineMd(line)}
+        </p>,
+      )
+    }
+  }
+  flush()
+  return out
+}
+
 export default function App() {
   // PWA update prompt — 'prompt' registration means a freshly-deployed service
   // worker waits; we surface it as a toast and activate + reload on click.
@@ -134,6 +198,12 @@ export default function App() {
   const [history, setHistory] = useState<Meeting[]>([])
   const [showInfo, setShowInfo] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
+  const [showSummary, setShowSummary] = useState(false)
+  const [summary, setSummary] = useState('')
+  const [summarizing, setSummarizing] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editText, setEditText] = useState('')
 
   // settings
   const webgpuAvailable = typeof navigator !== 'undefined' && 'gpu' in navigator
@@ -366,6 +436,7 @@ export default function App() {
     return () => {
       workerRef.current?.terminate()
       cloudAbortRef.current?.abort()
+      summaryAbortRef.current?.abort()
       void gladiaRef.current?.stop()
       if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
       void captureRef.current?.stop()
@@ -742,6 +813,46 @@ export default function App() {
 
   const removeMeeting = useCallback((id: string) => setHistory(deleteMeeting(id)), [])
 
+  // --- AI summary -----------------------------------------------------------
+  const summaryAbortRef = useRef<AbortController | null>(null)
+
+  const generateSummary = useCallback(() => {
+    if (!groqKey.trim() || segments.length === 0) return
+    setSummarizing(true)
+    setSummaryError(null)
+    setSummary('')
+    const ac = new AbortController()
+    summaryAbortRef.current = ac
+    summarizeTranscript({ transcript: buildExport(segments, 'txt'), apiKey: groqKey.trim(), signal: ac.signal })
+      .then((md) => setSummary(md))
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        setSummaryError(err instanceof Error ? err.message : 'Summary failed.')
+      })
+      .finally(() => setSummarizing(false))
+  }, [groqKey, segments])
+
+  const copySummary = useCallback(() => {
+    void navigator.clipboard.writeText(summary)
+    setNotice('Copied summary to clipboard.')
+    window.setTimeout(() => setNotice(null), 1800)
+  }, [summary])
+
+  // --- inline editing (fix a misheard word) ---------------------------------
+  const beginEdit = useCallback((s: Segment) => {
+    setEditingId(s.id)
+    setEditText(s.text)
+  }, [])
+
+  const saveEdit = useCallback(() => {
+    if (editingId == null) return
+    const t = editText.trim()
+    setSegments((segs) => segs.map((s) => (s.id === editingId ? { ...s, text: t || s.text } : s)))
+    setEditingId(null)
+  }, [editingId, editText])
+
+  const cancelEdit = useCallback(() => setEditingId(null), [])
+
   // --- derived --------------------------------------------------------------
   const filtered = useMemo(() => {
     if (!query.trim()) return null
@@ -812,12 +923,25 @@ export default function App() {
           </div>
           <div className="top-actions">
             <button
+              className="icon-btn lg accent"
+              aria-label="AI summary and action items"
+              aria-pressed={showSummary}
+              onClick={() => {
+                setShowSummary((v) => !v)
+                setShowInfo(false)
+                setShowHistory(false)
+              }}
+            >
+              <Sparkles size={18} />
+            </button>
+            <button
               className="icon-btn lg"
               aria-label="How it works"
               aria-pressed={showInfo}
               onClick={() => {
                 setShowInfo((v) => !v)
                 setShowHistory(false)
+                setShowSummary(false)
               }}
             >
               <Info size={18} />
@@ -829,6 +953,7 @@ export default function App() {
               onClick={() => {
                 setShowHistory((v) => !v)
                 setShowInfo(false)
+                setShowSummary(false)
               }}
             >
               <Clock size={18} />
@@ -889,6 +1014,74 @@ export default function App() {
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+
+      {showSummary && (
+        <div className="sheet">
+          <div className="sheet-head">
+            <strong className="sheet-title">
+              <Sparkles size={15} /> AI summary &amp; action items
+            </strong>
+            <button className="icon-btn" aria-label="Close" onClick={() => setShowSummary(false)}>
+              <Close size={16} />
+            </button>
+          </div>
+          {!groqKey.trim() ? (
+            <>
+              <p className="muted-note">
+                AI summary uses a free <strong>Groq</strong> model. Your <strong>transcript text</strong> is sent to
+                Groq to summarize (audio is not). Paste a free key from{' '}
+                <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">
+                  console.groq.com/keys
+                </a>{' '}
+                — it stays in this browser.
+              </p>
+              <div className="key-row">
+                <Key size={15} />
+                <input
+                  type="password"
+                  placeholder="gsk_…"
+                  value={groqKey}
+                  onChange={(e) => {
+                    setGroqKey(e.target.value)
+                    saveKey('groq', e.target.value.trim())
+                  }}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="summary-actions">
+                <button className="primary go sm" onClick={generateSummary} disabled={summarizing || !hasText}>
+                  <Sparkles size={15} /> {summarizing ? 'Summarizing…' : summary ? 'Regenerate' : 'Generate summary'}
+                </button>
+                {summary && (
+                  <button className="ghost sm" onClick={copySummary}>
+                    <Copy size={14} /> Copy
+                  </button>
+                )}
+              </div>
+              {summaryError && (
+                <div className="banner error" role="alert">
+                  <Alert size={15} />
+                  <span className="err-msg">{summaryError}</span>
+                </div>
+              )}
+              {summary ? (
+                <div className="summary-body">{renderMarkdown(summary)}</div>
+              ) : (
+                !summarizing &&
+                !summaryError && (
+                  <p className="muted-note">
+                    Turns your transcript into a TL;DR, key points, decisions, and action items.
+                  </p>
+                )
+              )}
+            </>
           )}
         </div>
       )}
@@ -1133,9 +1326,11 @@ export default function App() {
                 ))}
               </div>
               <span className={`status-chip ${paused ? 'paused' : ''}`}>
-                {paused ? 'Paused' : (
+                {paused ? (
+                  'থেমে আছে · Paused'
+                ) : (
                   <>
-                    <Ear size={14} /> Listening
+                    <Ear size={14} /> শুনছি · Listening
                   </>
                 )}
               </span>
@@ -1256,15 +1451,42 @@ export default function App() {
 
           {hiddenCount > 0 && <p className="hidden-note">{hiddenCount} earlier segments hidden — included in exports.</p>}
 
-          {visible.map((s) => (
-            <p key={s.id} className="seg">
-              <span className="ts">[{mmss(s.start)}]</span>
-              <span className="seg-text">{query.trim() ? highlight(s.text, query.trim()) : s.text}</span>
-              <button className="seg-copy" aria-label="Copy this line" onClick={() => copyLine(s)}>
-                <Copy size={13} />
-              </button>
-            </p>
-          ))}
+          {visible.map((s) =>
+            editingId === s.id ? (
+              <div key={s.id} className="seg editing">
+                <span className="ts">[{mmss(s.start)}]</span>
+                <textarea
+                  className="seg-edit"
+                  value={editText}
+                  autoFocus
+                  rows={2}
+                  onChange={(e) => setEditText(e.target.value)}
+                  onBlur={saveEdit}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      saveEdit()
+                    } else if (e.key === 'Escape') {
+                      cancelEdit()
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <p key={s.id} className="seg">
+                <span className="ts">[{mmss(s.start)}]</span>
+                <span className="seg-text">{query.trim() ? highlight(s.text, query.trim()) : s.text}</span>
+                <span className="seg-actions">
+                  <button className="seg-act" aria-label="Edit this line" onClick={() => beginEdit(s)}>
+                    <Pencil size={13} />
+                  </button>
+                  <button className="seg-act" aria-label="Copy this line" onClick={() => copyLine(s)}>
+                    <Copy size={13} />
+                  </button>
+                </span>
+              </p>
+            ),
+          )}
 
           {!filtered && interim && (
             <p className="seg interim" aria-hidden="true">

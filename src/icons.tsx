@@ -158,3 +158,10 @@ export const Pencil = ({ size = 14, className }: P) => (
     <path d="M13.5 6.5l4 4" />
   </svg>
 )
+
+export const Sparkles = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z" />
+    <path d="M18 14l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" />
+  </svg>
+)
