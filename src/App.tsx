@@ -33,7 +33,8 @@ import {
   Stop,
   Trash,
 } from './icons'
-import { CloudAuthError, loadKey, saveKey, transcribeCloud } from './cloud'
+import { CloudAuthError, loadKey, saveKey, transcribeCloud, type CloudProvider } from './cloud'
+import { GladiaLive } from './gladia'
 
 // --- tuning -----------------------------------------------------------------
 const MIN_INTERIM_S = 1.5
@@ -112,7 +113,9 @@ export default function App() {
   // settings
   const webgpuAvailable = typeof navigator !== 'undefined' && 'gpu' in navigator
   const [engine, setEngine] = useState<Engine>('ondevice')
+  const [cloudProvider, setCloudProvider] = useState<CloudProvider>('groq')
   const [groqKey, setGroqKey] = useState('')
+  const [gladiaKey, setGladiaKey] = useState('')
   const [model, setModel] = useState<ModelId>('onnx-community/whisper-small')
   const [device, setDevice] = useState<Device>(webgpuAvailable ? 'webgpu' : 'wasm')
   const [activeDevice, setActiveDevice] = useState<Device>(webgpuAvailable ? 'webgpu' : 'wasm')
@@ -145,12 +148,20 @@ export default function App() {
   const noticeTimerRef = useRef<number | null>(null)
   const modelReadyRef = useRef(false)
 
+  const gladiaRef = useRef<GladiaLive | null>(null)
+
   const statusRef = useRef<Status>(status)
   statusRef.current = status
   const engineRef = useRef<Engine>(engine)
   engineRef.current = engine
+  const providerRef = useRef<CloudProvider>(cloudProvider)
+  providerRef.current = cloudProvider
   const groqKeyRef = useRef(groqKey)
   groqKeyRef.current = groqKey
+  const gladiaKeyRef = useRef(gladiaKey)
+  gladiaKeyRef.current = gladiaKey
+  const languageRef = useRef(language)
+  languageRef.current = language
 
   const elapsedNow = useCallback(
     () => accumRef.current + (activeRef.current ? (performance.now() - runStartRef.current) / 1000 : 0),
@@ -186,6 +197,21 @@ export default function App() {
     [elapsedNow],
   )
 
+  // Gladia pushes finalized utterances directly (no request-id round-trip).
+  const appendFinal = useCallback(
+    (raw: string) => {
+      const text = (raw ?? '').trim()
+      if (!text) return
+      const end = elapsedNow()
+      const start = lastSegEndRef.current
+      lastSegEndRef.current = end
+      const id = segIdRef.current++
+      setSegments((segs) => [...segs, { id, text, start, end }])
+      setInterim('')
+    },
+    [elapsedNow],
+  )
+
   // --- restore a previous session on first load -----------------------------
   useEffect(() => {
     const saved = loadSession()
@@ -198,11 +224,13 @@ export default function App() {
       setRestored({ count: saved.segments.length, when: saved.savedAt })
     }
     if (localStorage.getItem('mt:preflightSeen') === '1') setDontRemind(true)
-    const k = loadKey()
-    if (k) {
-      setGroqKey(k)
-      setEngine('cloud')
-    }
+    const gk = loadKey('groq')
+    const lk = loadKey('gladia')
+    if (gk) setGroqKey(gk)
+    if (lk) setGladiaKey(lk)
+    const savedProvider = localStorage.getItem('mt:cloudProvider')
+    if (savedProvider === 'groq' || savedProvider === 'gladia') setCloudProvider(savedProvider)
+    if (gk || lk) setEngine('cloud')
   }, [])
 
   // --- autosave (skip the mount run so it can't clobber a restored session) -
@@ -297,6 +325,7 @@ export default function App() {
     return () => {
       workerRef.current?.terminate()
       cloudAbortRef.current?.abort()
+      void gladiaRef.current?.stop()
       if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
       void captureRef.current?.stop()
     }
@@ -384,7 +413,11 @@ export default function App() {
   )
 
   const stopRecording = useCallback(async () => {
-    flushSegment(true)
+    flushSegment(true) // no-op for Gladia (nothing buffered); finalizes worker/Groq
+    if (gladiaRef.current) {
+      await gladiaRef.current.stop()
+      gladiaRef.current = null
+    }
     accumRef.current = elapsedNow()
     activeRef.current = false
     pausedRef.current = false
@@ -424,6 +457,31 @@ export default function App() {
 
   const beginCapture = useCallback(async () => {
     setError(null)
+
+    // Gladia is a live WebSocket — open the session before we start capturing.
+    if (engineRef.current === 'cloud' && providerRef.current === 'gladia') {
+      const session = new GladiaLive()
+      try {
+        await session.start({
+          apiKey: gladiaKeyRef.current,
+          language: languageRef.current,
+          handlers: {
+            onPartial: (t) => setInterim(t),
+            onFinal: (t) => appendFinal(t),
+            onError: (m) => transientNotice(m),
+            onClosed: () => {
+              if (activeRef.current) transientNotice('Gladia closed the stream — press Stop, then start again to reconnect.')
+            },
+          },
+        })
+      } catch (err) {
+        if (err instanceof CloudAuthError) setError({ message: err.message, retry: 'record' })
+        else setError({ message: err instanceof Error ? err.message : 'Could not start Gladia.', retry: 'record' })
+        return
+      }
+      gladiaRef.current = session
+    }
+
     const capture = new AudioCapture()
     captureRef.current = capture
     chunksRef.current = []
@@ -438,6 +496,12 @@ export default function App() {
         {
           onAudio: (block) => {
             if (pausedRef.current) return
+            // Gladia: stream straight to the socket. Otherwise buffer for the
+            // worker / Groq batch path.
+            if (gladiaRef.current) {
+              gladiaRef.current.send(block)
+              return
+            }
             chunksRef.current.push(block)
             lenRef.current += block.length
           },
@@ -452,6 +516,8 @@ export default function App() {
       )
     } catch (err) {
       captureRef.current = null
+      void gladiaRef.current?.stop()
+      gladiaRef.current = null
       const name = err instanceof DOMException ? err.name : ''
       const raw = err instanceof Error ? err.message : String(err)
       const message =
@@ -466,7 +532,7 @@ export default function App() {
     activeRef.current = true
     setStatus('recording')
     void requestWake()
-  }, [useMic, useSystem, requestWake])
+  }, [useMic, useSystem, requestWake, appendFinal, transientNotice])
 
   const handleStart = useCallback(() => {
     if (useSystem && localStorage.getItem('mt:preflightSeen') !== '1') {
@@ -609,12 +675,28 @@ export default function App() {
   const modelSize = MODEL_SIZE[model] ?? ''
   const barLevel = paused ? 0.12 : level
   const cloud = engine === 'cloud'
-  const keyOk = groqKey.trim().length > 0
+  const gladia = cloudProvider === 'gladia'
+  const currentKey = gladia ? gladiaKey : groqKey
+  const keyOk = currentKey.trim().length > 0
   const ready = cloud ? keyOk : status === 'ready'
 
   const setKey = (v: string) => {
-    setGroqKey(v)
-    saveKey(v.trim())
+    if (gladia) {
+      setGladiaKey(v)
+      saveKey('gladia', v.trim())
+    } else {
+      setGroqKey(v)
+      saveKey('groq', v.trim())
+    }
+  }
+  const setProvider = (p: CloudProvider) => {
+    setCloudProvider(p)
+    setError(null)
+    try {
+      localStorage.setItem('mt:cloudProvider', p)
+    } catch {
+      /* ignore */
+    }
   }
 
   return (
@@ -631,7 +713,7 @@ export default function App() {
         <div className="badges">
           {cloud ? (
             <>
-              <span className="badge ok">Cloud · large-v3</span>
+              <span className="badge ok">{gladia ? 'Cloud · Gladia live' : 'Cloud · large-v3'}</span>
               <span className="badge warn">Audio leaves device</span>
             </>
           ) : (
@@ -712,26 +794,59 @@ export default function App() {
                 </>
               ) : (
                 <div className="cloud-config">
-                  <span className="eyebrow">Groq API key</span>
+                  <span className="eyebrow">Cloud provider</span>
+                  <div className="segmented small" role="tablist" aria-label="Cloud provider">
+                    <button
+                      role="tab"
+                      aria-selected={!gladia}
+                      className={!gladia ? 'on' : ''}
+                      onClick={() => setProvider('groq')}
+                    >
+                      Groq · fast
+                    </button>
+                    <button
+                      role="tab"
+                      aria-selected={gladia}
+                      className={gladia ? 'on' : ''}
+                      onClick={() => setProvider('gladia')}
+                    >
+                      Gladia · best Bangla
+                    </button>
+                  </div>
+
+                  <span className="eyebrow">{gladia ? 'Gladia API key' : 'Groq API key'}</span>
                   <div className="key-row">
                     <Key size={15} />
                     <input
                       type="password"
-                      placeholder="gsk_…"
-                      value={groqKey}
+                      placeholder={gladia ? 'your Gladia API key' : 'gsk_…'}
+                      value={currentKey}
                       onChange={(e) => setKey(e.target.value)}
                       autoComplete="off"
                       spellCheck={false}
                     />
                   </div>
-                  <p className="cloud-note">
-                    Free key from{' '}
-                    <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">
-                      console.groq.com/keys
-                    </a>
-                    . It stays in this browser. Audio is sent to Groq (Whisper large-v3) to transcribe —
-                    <strong> don’t use for confidential meetings</strong> unless your data policy allows it.
-                  </p>
+                  {gladia ? (
+                    <p className="cloud-note">
+                      Free key from{' '}
+                      <a href="https://app.gladia.io" target="_blank" rel="noreferrer">
+                        app.gladia.io
+                      </a>{' '}
+                      (10 hrs/month). Purpose-built for Bangla with live streaming and code-switching — the best
+                      free Bangla accuracy. It stays in this browser. Audio is streamed to Gladia —
+                      <strong> don’t use for confidential meetings</strong> unless your policy allows it.
+                    </p>
+                  ) : (
+                    <p className="cloud-note">
+                      Free key from{' '}
+                      <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">
+                        console.groq.com/keys
+                      </a>
+                      . Fast Whisper large-v3, but Bangla is only modestly better than on-device. It stays in this
+                      browser. Audio is sent to Groq — <strong>don’t use for confidential meetings</strong> unless
+                      your policy allows it.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -778,7 +893,9 @@ export default function App() {
               {ready && !useMic && !useSystem && (
                 <span className="hint">Pick at least one audio source above.</span>
               )}
-              {cloud && !keyOk && <span className="hint">Paste your free Groq API key above to start.</span>}
+              {cloud && !keyOk && (
+                <span className="hint">Paste your free {gladia ? 'Gladia' : 'Groq'} API key above to start.</span>
+              )}
             </div>
 
             {status === 'loading' && (
@@ -906,7 +1023,7 @@ export default function App() {
             <ol className="firstrun">
               {cloud && !keyOk && (
                 <>
-                  <li>Paste your free Groq API key in the box above.</li>
+                  <li>Paste your free {gladia ? 'Gladia' : 'Groq'} API key in the box above.</li>
                   <li>Press “Start transcribing”.</li>
                   <li>
                     Tick “Share audio” in the picker — <strong>the step most people miss.</strong>

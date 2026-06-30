@@ -5,27 +5,30 @@
 // There is no server in between (so nothing for us to host or to leak the key).
 // Trade-off vs on-device: audio leaves the device — surfaced clearly in the UI.
 
-export type CloudProvider = 'groq'
+export type CloudProvider = 'groq' | 'gladia'
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
 // large-v3 (not turbo) is the more accurate choice for low-resource languages
 // like Bangla; Groq is fast enough that the speed difference is irrelevant.
 const GROQ_MODEL = 'whisper-large-v3'
 
-const KEY_STORE = 'mt:cloud:groqKey:v1'
+const KEY_STORES: Record<CloudProvider, string> = {
+  groq: 'mt:cloud:groqKey:v1',
+  gladia: 'mt:cloud:gladiaKey:v1',
+}
 
-export function loadKey(): string {
+export function loadKey(provider: CloudProvider): string {
   try {
-    return localStorage.getItem(KEY_STORE) ?? ''
+    return localStorage.getItem(KEY_STORES[provider]) ?? ''
   } catch {
     return ''
   }
 }
 
-export function saveKey(key: string) {
+export function saveKey(provider: CloudProvider, key: string) {
   try {
-    if (key) localStorage.setItem(KEY_STORE, key)
-    else localStorage.removeItem(KEY_STORE)
+    if (key) localStorage.setItem(KEY_STORES[provider], key)
+    else localStorage.removeItem(KEY_STORES[provider])
   } catch {
     /* ignore */
   }
