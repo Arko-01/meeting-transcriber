@@ -17,11 +17,14 @@ import {
 import {
   Alert,
   ArrowDown,
+  Cloud,
   CloudCheck,
   Close,
   Copy,
+  Cpu,
   Download,
   Ear,
+  Key,
   Mic,
   Pause,
   Play,
@@ -30,6 +33,7 @@ import {
   Stop,
   Trash,
 } from './icons'
+import { CloudAuthError, loadKey, saveKey, transcribeCloud } from './cloud'
 
 // --- tuning -----------------------------------------------------------------
 const MIN_INTERIM_S = 1.5
@@ -43,11 +47,13 @@ const RENDER_CAP = 400 // keep the live DOM bounded on multi-hour meetings
 const WAVE = [0.5, 0.85, 0.6, 1, 0.55, 0.9, 0.45, 0.95, 0.6, 0.8, 0.5, 0.88, 0.62, 0.78]
 
 type Status = 'idle' | 'loading' | 'ready' | 'recording'
+type Engine = 'ondevice' | 'cloud'
 
 const MODELS: { id: ModelId; label: string; note: string }[] = [
   { id: 'onnx-community/whisper-tiny', label: 'Tiny', note: 'fastest, lowest accuracy' },
-  { id: 'onnx-community/whisper-base', label: 'Base', note: 'balanced — recommended' },
-  { id: 'onnx-community/whisper-small', label: 'Small', note: 'best Bangla, needs a strong PC' },
+  { id: 'onnx-community/whisper-base', label: 'Base', note: 'fast, basic accuracy' },
+  { id: 'onnx-community/whisper-small', label: 'Small', note: 'recommended — good balance' },
+  { id: 'onnx-community/whisper-large-v3-turbo', label: 'Large v3 Turbo', note: 'highest accuracy, strong GPU' },
 ]
 
 const LANGUAGES: { id: Language; label: string }[] = [
@@ -105,7 +111,9 @@ export default function App() {
 
   // settings
   const webgpuAvailable = typeof navigator !== 'undefined' && 'gpu' in navigator
-  const [model, setModel] = useState<ModelId>('onnx-community/whisper-base')
+  const [engine, setEngine] = useState<Engine>('ondevice')
+  const [groqKey, setGroqKey] = useState('')
+  const [model, setModel] = useState<ModelId>('onnx-community/whisper-small')
   const [device, setDevice] = useState<Device>(webgpuAvailable ? 'webgpu' : 'wasm')
   const [activeDevice, setActiveDevice] = useState<Device>(webgpuAvailable ? 'webgpu' : 'wasm')
   const [language, setLanguage] = useState<Language>('auto')
@@ -133,13 +141,49 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const atBottomRef = useRef(true)
   const exportRef = useRef<HTMLDetailsElement | null>(null)
+  const cloudAbortRef = useRef<AbortController | null>(null)
+  const noticeTimerRef = useRef<number | null>(null)
+  const modelReadyRef = useRef(false)
 
   const statusRef = useRef<Status>(status)
   statusRef.current = status
+  const engineRef = useRef<Engine>(engine)
+  engineRef.current = engine
+  const groqKeyRef = useRef(groqKey)
+  groqKeyRef.current = groqKey
 
   const elapsedNow = useCallback(
     () => accumRef.current + (activeRef.current ? (performance.now() - runStartRef.current) / 1000 : 0),
     [],
+  )
+
+  const transientNotice = useCallback((msg: string, ms = 3500) => {
+    setNotice(msg)
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), ms)
+  }, [])
+
+  // Shared by the on-device worker and the cloud path: turn a transcription
+  // result into either the live interim line or a finalized, timestamped segment.
+  const commitResult = useCallback(
+    (requestId: number, final: boolean, raw: string) => {
+      const text = (raw ?? '').trim()
+      busyRef.current = false
+      if (final && finalReqRef.current.has(requestId)) {
+        finalReqRef.current.delete(requestId)
+        if (text) {
+          const end = elapsedNow()
+          const start = lastSegEndRef.current
+          lastSegEndRef.current = end
+          const id = segIdRef.current++
+          setSegments((segs) => [...segs, { id, text, start, end }])
+        }
+        setInterim('')
+      } else if (!final) {
+        setInterim(text)
+      }
+    },
+    [elapsedNow],
   )
 
   // --- restore a previous session on first load -----------------------------
@@ -154,6 +198,11 @@ export default function App() {
       setRestored({ count: saved.segments.length, when: saved.savedAt })
     }
     if (localStorage.getItem('mt:preflightSeen') === '1') setDontRemind(true)
+    const k = loadKey()
+    if (k) {
+      setGroqKey(k)
+      setEngine('cloud')
+    }
   }, [])
 
   // --- autosave (skip the mount run so it can't clobber a restored session) -
@@ -198,29 +247,22 @@ export default function App() {
         case 'ready':
           setProgress(null)
           setActiveDevice(msg.device)
+          modelReadyRef.current = true
           setStatus((s) => (s === 'loading' ? 'ready' : s))
           break
-        case 'result': {
-          const text: string = (msg.text ?? '').trim()
-          if (finalReqRef.current.has(msg.requestId)) {
-            finalReqRef.current.delete(msg.requestId)
-            busyRef.current = false
-            if (text) {
-              const end = elapsedNow()
-              const start = lastSegEndRef.current
-              lastSegEndRef.current = end
-              const id = segIdRef.current++
-              setSegments((segs) => [...segs, { id, text, start, end }])
-            }
-            setInterim('')
-          } else {
-            busyRef.current = false
-            setInterim(text)
-          }
+        case 'result':
+          commitResult(msg.requestId, msg.final, msg.text ?? '')
           break
-        }
         case 'error': {
           busyRef.current = false
+          // A requestId means a single segment failed mid-meeting — keep going.
+          if (typeof msg.requestId === 'number') {
+            finalReqRef.current.delete(msg.requestId)
+            setInterim('')
+            transientNotice('Skipped a segment (engine hiccup). Still recording.')
+            break
+          }
+          // No requestId → the model failed to load.
           const wasLoading = statusRef.current === 'loading'
           if (wasLoading) setStatus('idle')
           setProgress(null)
@@ -249,22 +291,31 @@ export default function App() {
     }
     workerRef.current = w
     return w
-  }, [elapsedNow])
+  }, [commitResult, transientNotice])
 
   useEffect(() => {
     return () => {
       workerRef.current?.terminate()
+      cloudAbortRef.current?.abort()
+      if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
       void captureRef.current?.stop()
     }
   }, [])
 
   const loadModel = useCallback(() => {
     setError(null)
+    modelReadyRef.current = false
     setStatus('loading')
     setProgress(0)
     setActiveDevice(device)
     ensureWorker().postMessage({ type: 'load', model, device })
   }, [ensureWorker, model, device])
+
+  const switchEngine = useCallback((e: Engine) => {
+    setEngine(e)
+    setError(null)
+    if (e === 'ondevice') setStatus(modelReadyRef.current ? 'ready' : 'idle')
+  }, [])
 
   // --- wake lock ------------------------------------------------------------
   const requestWake = useCallback(async () => {
@@ -292,8 +343,8 @@ export default function App() {
   // --- transcription loop ---------------------------------------------------
   const flushSegment = useCallback(
     (final: boolean) => {
-      const w = workerRef.current
-      if (!w || lenRef.current === 0) return
+      if (lenRef.current === 0) return
+      if (engineRef.current === 'ondevice' && !workerRef.current) return
       const audio = flatten(chunksRef.current, lenRef.current)
       const reqId = ++reqRef.current
       if (final) {
@@ -303,10 +354,33 @@ export default function App() {
         hadSpeechRef.current = false
       }
       busyRef.current = true
+
+      if (engineRef.current === 'cloud') {
+        const ac = new AbortController()
+        cloudAbortRef.current = ac
+        transcribeCloud({ audio, apiKey: groqKeyRef.current, language, signal: ac.signal })
+          .then((text) => commitResult(reqId, final, text))
+          .catch((err: unknown) => {
+            busyRef.current = false
+            finalReqRef.current.delete(reqId)
+            setInterim('')
+            if (err instanceof DOMException && err.name === 'AbortError') return
+            if (err instanceof CloudAuthError) {
+              setError({ message: err.message, retry: 'record' })
+            } else {
+              transientNotice(err instanceof Error ? err.message : 'Cloud transcription failed.')
+            }
+          })
+        return
+      }
+
       const buf = audio.buffer as ArrayBuffer
-      w.postMessage({ type: 'transcribe', audio: buf, language, requestId: reqId, final }, [buf])
+      workerRef.current!.postMessage(
+        { type: 'transcribe', audio: buf, language, requestId: reqId, final },
+        [buf],
+      )
     },
-    [language],
+    [language, commitResult, transientNotice],
   )
 
   const stopRecording = useCallback(async () => {
@@ -336,6 +410,12 @@ export default function App() {
     const shouldCommit =
       seconds >= MAX_SEGMENT_S ||
       (seconds >= MIN_COMMIT_S && hadSpeechRef.current && silenceFor >= SILENCE_MS)
+    // Cloud is batch + rate-limited, so only send finalized segments — never the
+    // per-tick interim updates (which would burn through the free request quota).
+    if (engineRef.current === 'cloud') {
+      if (shouldCommit) flushSegment(true)
+      return
+    }
     flushSegment(shouldCommit)
   }, [flushSegment, stopRecording, elapsedNow])
 
@@ -528,6 +608,14 @@ export default function App() {
   const recording = status === 'recording'
   const modelSize = MODEL_SIZE[model] ?? ''
   const barLevel = paused ? 0.12 : level
+  const cloud = engine === 'cloud'
+  const keyOk = groqKey.trim().length > 0
+  const ready = cloud ? keyOk : status === 'ready'
+
+  const setKey = (v: string) => {
+    setGroqKey(v)
+    saveKey(v.trim())
+  }
 
   return (
     <div className="app">
@@ -541,10 +629,19 @@ export default function App() {
           <span className="wordmark">Meeting Transcriber</span>
         </div>
         <div className="badges">
-          <span className={`badge ${activeDevice === 'webgpu' ? 'ok' : 'warn'}`}>
-            {activeDevice === 'webgpu' ? 'Fast · GPU' : 'CPU mode'}
-          </span>
-          <span className="badge">On-device</span>
+          {cloud ? (
+            <>
+              <span className="badge ok">Cloud · large-v3</span>
+              <span className="badge warn">Audio leaves device</span>
+            </>
+          ) : (
+            <>
+              <span className={`badge ${activeDevice === 'webgpu' ? 'ok' : 'warn'}`}>
+                {activeDevice === 'webgpu' ? 'Fast · GPU' : 'CPU mode'}
+              </span>
+              <span className="badge">On-device</span>
+            </>
+          )}
         </div>
       </header>
 
@@ -566,26 +663,77 @@ export default function App() {
         {!recording && !preflight && (
           <>
             <div className="settings">
-              <label>
-                <span className="eyebrow">Model</span>
-                <select value={model} onChange={(e) => setModel(e.target.value as ModelId)} disabled={status !== 'idle'}>
-                  {MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label} — {m.note} ({MODEL_SIZE[m.id]})
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div className="engine">
+                <span className="eyebrow">Engine</span>
+                <div className="segmented" role="tablist" aria-label="Transcription engine">
+                  <button
+                    role="tab"
+                    aria-selected={!cloud}
+                    className={!cloud ? 'on' : ''}
+                    onClick={() => switchEngine('ondevice')}
+                    disabled={status === 'loading'}
+                  >
+                    <Cpu size={15} /> On-device · private
+                  </button>
+                  <button
+                    role="tab"
+                    aria-selected={cloud}
+                    className={cloud ? 'on' : ''}
+                    onClick={() => switchEngine('cloud')}
+                    disabled={status === 'loading'}
+                  >
+                    <Cloud size={15} /> Cloud boost · best Bangla
+                  </button>
+                </div>
+              </div>
 
-              <label>
-                <span className="eyebrow">Speed</span>
-                <select value={device} onChange={(e) => setDevice(e.target.value as Device)} disabled={status !== 'idle'}>
-                  <option value="webgpu" disabled={!webgpuAvailable}>
-                    Fast (uses GPU){webgpuAvailable ? '' : ' — unavailable'}
-                  </option>
-                  <option value="wasm">Compatible (slower, works everywhere)</option>
-                </select>
-              </label>
+              {!cloud ? (
+                <>
+                  <label>
+                    <span className="eyebrow">Model</span>
+                    <select value={model} onChange={(e) => setModel(e.target.value as ModelId)} disabled={status !== 'idle'}>
+                      {MODELS.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label} — {m.note} ({MODEL_SIZE[m.id]})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    <span className="eyebrow">Speed</span>
+                    <select value={device} onChange={(e) => setDevice(e.target.value as Device)} disabled={status !== 'idle'}>
+                      <option value="webgpu" disabled={!webgpuAvailable}>
+                        Fast (uses GPU){webgpuAvailable ? '' : ' — unavailable'}
+                      </option>
+                      <option value="wasm">Compatible (slower, works everywhere)</option>
+                    </select>
+                  </label>
+                </>
+              ) : (
+                <div className="cloud-config">
+                  <span className="eyebrow">Groq API key</span>
+                  <div className="key-row">
+                    <Key size={15} />
+                    <input
+                      type="password"
+                      placeholder="gsk_…"
+                      value={groqKey}
+                      onChange={(e) => setKey(e.target.value)}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <p className="cloud-note">
+                    Free key from{' '}
+                    <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">
+                      console.groq.com/keys
+                    </a>
+                    . It stays in this browser. Audio is sent to Groq (Whisper large-v3) to transcribe —
+                    <strong> don’t use for confidential meetings</strong> unless your data policy allows it.
+                  </p>
+                </div>
+              )}
 
               <label>
                 <span className="eyebrow">Language</span>
@@ -612,24 +760,25 @@ export default function App() {
             </div>
 
             <div className="actions">
-              {status === 'idle' && (
+              {!cloud && status === 'idle' && (
                 <button className="primary" onClick={loadModel}>
                   <Download size={17} /> Download model · {modelSize}, one-time
                 </button>
               )}
-              {status === 'loading' && (
+              {!cloud && status === 'loading' && (
                 <button className="primary" disabled>
                   Downloading… {progress ?? 0}%
                 </button>
               )}
-              {status === 'ready' && (
+              {ready && (
                 <button className="primary go" onClick={handleStart} disabled={!useMic && !useSystem}>
                   <Play size={16} /> Start transcribing
                 </button>
               )}
-              {status === 'ready' && !useMic && !useSystem && (
+              {ready && !useMic && !useSystem && (
                 <span className="hint">Pick at least one audio source above.</span>
               )}
+              {cloud && !keyOk && <span className="hint">Paste your free Groq API key above to start.</span>}
             </div>
 
             {status === 'loading' && (
@@ -755,15 +904,24 @@ export default function App() {
         <div className="transcript" ref={scrollRef} onScroll={onScroll}>
           {!hasText && !interim && (
             <ol className="firstrun">
-              {status === 'idle' && (
+              {cloud && !keyOk && (
+                <>
+                  <li>Paste your free Groq API key in the box above.</li>
+                  <li>Press “Start transcribing”.</li>
+                  <li>
+                    Tick “Share audio” in the picker — <strong>the step most people miss.</strong>
+                  </li>
+                </>
+              )}
+              {!cloud && status === 'idle' && (
                 <>
                   <li>Pick your language (or leave it on Auto-detect).</li>
                   <li>Download the model — one-time, {modelSize}, then it works offline.</li>
                   <li>Press Start — we’ll guide you through the prompts.</li>
                 </>
               )}
-              {status === 'loading' && <li>Downloading the speech model… this happens only once.</li>}
-              {status === 'ready' && (
+              {!cloud && status === 'loading' && <li>Downloading the speech model… this happens only once.</li>}
+              {ready && (
                 <>
                   <li>Press “Start transcribing”.</li>
                   <li>Pick your meeting window or tab in the share picker.</li>

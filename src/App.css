@@ -272,6 +272,95 @@
   flex: none;
 }
 
+/* engine toggle + cloud config */
+.engine {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.segmented {
+  display: flex;
+  gap: 5px;
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: 11px;
+  padding: 4px;
+}
+
+.segmented button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.segmented button.on {
+  background: var(--panel2);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.segmented button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cloud-config {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: 10px;
+  padding: 0 11px;
+  color: var(--muted);
+}
+
+.key-row input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 14px;
+  padding: 11px 0;
+  outline: none;
+  font-family: ui-monospace, Consolas, monospace;
+  letter-spacing: 1px;
+}
+
+.cloud-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.cloud-note a {
+  color: var(--accent);
+}
+
+.cloud-note strong {
+  color: var(--amber);
+}
+
 /* actions ------------------------------------------------------------------*/
 .actions {
   display: flex;

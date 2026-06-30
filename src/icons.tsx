@@ -116,3 +116,23 @@ export const Ear = ({ size = 15, className }: P) => (
     <path d="M9.5 9a2.5 2.5 0 0 1 5 0" />
   </svg>
 )
+
+export const Cloud = ({ size = 15, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M7 18a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.5A3.5 3.5 0 0 1 17 18z" />
+  </svg>
+)
+
+export const Cpu = ({ size = 15, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <rect x="7" y="7" width="10" height="10" rx="1.5" />
+    <path d="M10 4v3M14 4v3M10 17v3M14 17v3M4 10h3M4 14h3M17 10h3M17 14h3" />
+  </svg>
+)
+
+export const Key = ({ size = 15, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <circle cx="8" cy="15" r="4" />
+    <path d="M11 12l9-9M17 6l2 2M14 9l2 2" />
+  </svg>
+)

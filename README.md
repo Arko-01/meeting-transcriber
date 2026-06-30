@@ -58,13 +58,27 @@ The app is a static bundle — host it for free anywhere:
 
 No server, no API keys, no per-minute costs — ever.
 
-## Models
+## Models (on-device)
 
 | Model | Size | Notes |
 |-------|------|-------|
 | Tiny  | ~40 MB  | Fastest, lowest accuracy |
-| Base  | ~80 MB  | Balanced (default) |
-| Small | ~250 MB | Best Bangla, needs a strong PC / GPU |
+| Base  | ~80 MB  | Fast, basic accuracy |
+| Small | ~250 MB | **Default** — good balance |
+| Large v3 Turbo | ~1.6 GB | Highest accuracy, needs a strong GPU (WebGPU) |
 
 Model weights are streamed from the Hugging Face CDN on first use and cached by
 the browser. They are **not** bundled or precached by the service worker.
+
+## Cloud boost (optional)
+
+Bangla is genuinely hard for Whisper at any size, so there's an optional
+**bring-your-own-key cloud mode** for higher accuracy. Pick **Cloud boost** in the
+Engine toggle and paste a free [Groq](https://console.groq.com/keys) API key — audio
+is sent directly from your browser to Groq's Whisper `large-v3` (the key never
+leaves your browser; there is no server in between).
+
+Trade-offs, surfaced in the UI: **audio leaves your device** (don't use for
+confidential meetings unless your policy allows it), the free tier is rate-limited
+(~20 requests/min), and it's batch (finalized segments only — no per-word interim).
+On-device remains the private default.

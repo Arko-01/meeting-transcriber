@@ -107,4 +107,5 @@ export const MODEL_SIZE: Record<string, string> = {
   'onnx-community/whisper-tiny': '~40 MB',
   'onnx-community/whisper-base': '~80 MB',
   'onnx-community/whisper-small': '~250 MB',
+  'onnx-community/whisper-large-v3-turbo': '~1.6 GB',
 }

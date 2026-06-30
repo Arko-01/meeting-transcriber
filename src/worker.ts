@@ -17,6 +17,7 @@ export type ModelId =
   | 'onnx-community/whisper-tiny'
   | 'onnx-community/whisper-base'
   | 'onnx-community/whisper-small'
+  | 'onnx-community/whisper-large-v3-turbo'
 
 export type Device = 'webgpu' | 'wasm'
 export type Language = 'auto' | 'en' | 'bn'
@@ -42,13 +43,22 @@ type InMessage = LoadMessage | TranscribeMessage
 let transcriber: AutomaticSpeechRecognitionPipeline | null = null
 let loadingKey: string | null = null
 
+function dtypeFor(model: ModelId, device: Device) {
+  // Whisper encoders are very quantization-sensitive, so keep them high
+  // precision; the fp16 *decoder* is broken in transformers.js, so use q4.
+  if (device !== 'webgpu') {
+    return { encoder_model: 'q8', decoder_model_merged: 'q8' }
+  }
+  // large-v3-turbo: its fp32 encoder is ~2.5 GB. fp16 encoder (~1.3 GB) keeps
+  // accuracy while halving the download; q4 decoder keeps it ~1.6 GB total.
+  if (model === 'onnx-community/whisper-large-v3-turbo') {
+    return { encoder_model: 'fp16', decoder_model_merged: 'q4' }
+  }
+  return { encoder_model: 'fp32', decoder_model_merged: 'q4' }
+}
+
 async function createPipeline(model: ModelId, device: Device) {
-  // WebGPU runs the encoder best in fp32 and the decoder in a quantized dtype;
-  // wasm uses int8 everywhere to keep memory + download small.
-  const dtype =
-    device === 'webgpu'
-      ? { encoder_model: 'fp32', decoder_model_merged: 'q4' }
-      : { encoder_model: 'q8', decoder_model_merged: 'q8' }
+  const dtype = dtypeFor(model, device)
 
   return (await pipeline('automatic-speech-recognition', model, {
     device,
