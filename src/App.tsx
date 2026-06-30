@@ -4,20 +4,26 @@ import './App.css'
 import { AudioCapture, SAMPLE_RATE } from './audio'
 import type { Device, Language, ModelId } from './worker'
 import {
+  archiveMeeting,
   buildExport,
   clearSession,
+  deleteMeeting,
+  downloadDocx,
   downloadText,
+  loadHistory,
   loadSession,
   MODEL_SIZE,
   mmss,
   relativeTime,
   saveSession,
-  type ExportFormat,
+  type Meeting,
   type Segment,
+  type TextFormat,
 } from './lib'
 import {
   Alert,
   ArrowDown,
+  Clock,
   Cloud,
   CloudCheck,
   Close,
@@ -25,9 +31,11 @@ import {
   Cpu,
   Download,
   Ear,
+  Info,
   Key,
   Mic,
   Pause,
+  Pencil,
   Play,
   Refresh,
   Search,
@@ -121,10 +129,21 @@ export default function App() {
   const [dontRemind, setDontRemind] = useState(false)
   const [query, setQuery] = useState('')
   const [restored, setRestored] = useState<{ count: number; when: number } | null>(null)
-  const [undo, setUndo] = useState<Segment[] | null>(null)
+  const [undo, setUndo] = useState<{ segments: Segment[]; title: string } | null>(null)
+  const [title, setTitle] = useState('')
+  const [history, setHistory] = useState<Meeting[]>([])
+  const [showInfo, setShowInfo] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
 
   // settings
   const webgpuAvailable = typeof navigator !== 'undefined' && 'gpu' in navigator
+  // Tab/system-audio capture needs getDisplayMedia, which mobile browsers don't
+  // usefully support — so we detect it and don't pretend it works on phones.
+  const systemSupported =
+    typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getDisplayMedia === 'function' &&
+    !/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
   const [engine, setEngine] = useState<Engine>('ondevice')
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>('groq')
   const [groqKey, setGroqKey] = useState('')
@@ -134,7 +153,7 @@ export default function App() {
   const [activeDevice, setActiveDevice] = useState<Device>(webgpuAvailable ? 'webgpu' : 'wasm')
   const [language, setLanguage] = useState<Language>('auto')
   const [useMic, setUseMic] = useState(true)
-  const [useSystem, setUseSystem] = useState(true)
+  const [useSystem, setUseSystem] = useState(systemSupported)
 
   // refs
   const workerRef = useRef<Worker | null>(null)
@@ -146,6 +165,9 @@ export default function App() {
   const hadSpeechRef = useRef(false)
   const reqRef = useRef(0)
   const finalReqRef = useRef<Set<number>>(new Set())
+  // requestId -> elapsed seconds at flush, so a segment's end reflects when the
+  // audio actually ended, not when (possibly slow/async) inference resolved.
+  const flushTimeRef = useRef<Map<number, number>>(new Map())
   const segIdRef = useRef(1)
   const lastSegEndRef = useRef(0)
   const accumRef = useRef(0)
@@ -175,6 +197,8 @@ export default function App() {
   gladiaKeyRef.current = gladiaKey
   const languageRef = useRef(language)
   languageRef.current = language
+  const titleRef = useRef(title)
+  titleRef.current = title
 
   const elapsedNow = useCallback(
     () => accumRef.current + (activeRef.current ? (performance.now() - runStartRef.current) / 1000 : 0),
@@ -195,9 +219,10 @@ export default function App() {
       busyRef.current = false
       if (final && finalReqRef.current.has(requestId)) {
         finalReqRef.current.delete(requestId)
+        const end = flushTimeRef.current.get(requestId) ?? elapsedNow()
+        flushTimeRef.current.delete(requestId)
         if (text) {
-          const end = elapsedNow()
-          const start = lastSegEndRef.current
+          const start = Math.min(lastSegEndRef.current, end)
           lastSegEndRef.current = end
           const id = segIdRef.current++
           setSegments((segs) => [...segs, { id, text, start, end }])
@@ -227,9 +252,11 @@ export default function App() {
 
   // --- restore a previous session on first load -----------------------------
   useEffect(() => {
+    setHistory(loadHistory())
     const saved = loadSession()
     if (saved) {
       setSegments(saved.segments)
+      setTitle(saved.title)
       segIdRef.current = saved.nextId
       const lastEnd = saved.segments.reduce((m, s) => Math.max(m, s.end), 0)
       lastSegEndRef.current = lastEnd
@@ -253,8 +280,8 @@ export default function App() {
       mountedRef.current = true
       return
     }
-    saveSession(segments, segIdRef.current)
-  }, [segments])
+    saveSession(segments, segIdRef.current, title)
+  }, [segments, title])
 
   // --- guard against losing a live meeting ----------------------------------
   useEffect(() => {
@@ -299,6 +326,7 @@ export default function App() {
           // A requestId means a single segment failed mid-meeting — keep going.
           if (typeof msg.requestId === 'number') {
             finalReqRef.current.delete(msg.requestId)
+            flushTimeRef.current.delete(msg.requestId)
             setInterim('')
             transientNotice('Skipped a segment (engine hiccup). Still recording.')
             break
@@ -391,6 +419,7 @@ export default function App() {
       const reqId = ++reqRef.current
       if (final) {
         finalReqRef.current.add(reqId)
+        flushTimeRef.current.set(reqId, elapsedNow())
         chunksRef.current = []
         lenRef.current = 0
         hadSpeechRef.current = false
@@ -405,6 +434,7 @@ export default function App() {
           .catch((err: unknown) => {
             busyRef.current = false
             finalReqRef.current.delete(reqId)
+            flushTimeRef.current.delete(reqId)
             setInterim('')
             if (err instanceof DOMException && err.name === 'AbortError') return
             if (err instanceof CloudAuthError) {
@@ -422,7 +452,7 @@ export default function App() {
         [buf],
       )
     },
-    [language, commitResult, transientNotice],
+    [language, commitResult, transientNotice, elapsedNow],
   )
 
   const stopRecording = useCallback(async () => {
@@ -627,8 +657,9 @@ export default function App() {
     if (el && atBottomRef.current) el.scrollTop = el.scrollHeight
   }, [interim])
 
-  // --- export / clear -------------------------------------------------------
+  // --- export / clear / history --------------------------------------------
   const hasText = segments.length > 0
+  const lastArchivedIdRef = useRef<string | null>(null)
 
   const copyAll = useCallback(() => {
     void navigator.clipboard.writeText(buildExport(segments, 'txt'))
@@ -636,43 +667,80 @@ export default function App() {
     window.setTimeout(() => setNotice(null), 2500)
   }, [segments])
 
+  const copyLine = useCallback((s: Segment) => {
+    void navigator.clipboard.writeText(s.text)
+    setNotice('Copied line to clipboard.')
+    window.setTimeout(() => setNotice(null), 1600)
+  }, [])
+
   const doExport = useCallback(
-    (fmt: ExportFormat) => {
-      downloadText(buildExport(segments, fmt), fmt)
+    (fmt: TextFormat | 'docx') => {
+      if (fmt === 'docx') void downloadDocx(segments, title)
+      else downloadText(buildExport(segments, fmt, title), fmt, title)
       if (exportRef.current) exportRef.current.open = false
     },
-    [segments],
+    [segments, title],
   )
 
-  const clearAll = useCallback(() => {
-    setUndo(segments)
+  const resetSession = useCallback(() => {
     setSegments([])
     setInterim('')
-    clearSession()
-    lastSegEndRef.current = 0
-    accumRef.current = 0
-    setRestored(null)
-    if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current)
-    undoTimerRef.current = window.setTimeout(() => setUndo(null), 8000)
-  }, [segments])
-
-  const undoClear = useCallback(() => {
-    if (!undo) return
-    setSegments(undo)
-    const lastEnd = undo.reduce((m, s) => Math.max(m, s.end), 0)
-    lastSegEndRef.current = lastEnd
-    accumRef.current = lastEnd
-    setUndo(null)
-  }, [undo])
-
-  const startFresh = useCallback(() => {
-    setSegments([])
+    setTitle('')
     clearSession()
     lastSegEndRef.current = 0
     accumRef.current = 0
     segIdRef.current = 1
     setRestored(null)
   }, [])
+
+  const clearAll = useCallback(() => {
+    setUndo({ segments, title })
+    if (segments.length > 0) {
+      const h = archiveMeeting(title, segments)
+      setHistory(h)
+      lastArchivedIdRef.current = h[0]?.id ?? null
+    }
+    resetSession()
+    if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current)
+    undoTimerRef.current = window.setTimeout(() => setUndo(null), 8000)
+  }, [segments, title, resetSession])
+
+  const undoClear = useCallback(() => {
+    if (!undo) return
+    if (lastArchivedIdRef.current) {
+      setHistory(deleteMeeting(lastArchivedIdRef.current))
+      lastArchivedIdRef.current = null
+    }
+    setSegments(undo.segments)
+    setTitle(undo.title)
+    const lastEnd = undo.segments.reduce((m, s) => Math.max(m, s.end), 0)
+    lastSegEndRef.current = lastEnd
+    accumRef.current = lastEnd
+    setUndo(null)
+  }, [undo])
+
+  // "Start fresh" (from the restore banner) — archive what's open, then reset.
+  const startFresh = useCallback(() => {
+    if (segments.length > 0) setHistory(archiveMeeting(title, segments))
+    resetSession()
+  }, [segments, title, resetSession])
+
+  const loadMeeting = useCallback(
+    (m: Meeting) => {
+      if (segments.length > 0) setHistory(archiveMeeting(title, segments))
+      setSegments(m.segments)
+      setTitle(m.title)
+      const lastEnd = m.segments.reduce((mx, s) => Math.max(mx, s.end), 0)
+      lastSegEndRef.current = lastEnd
+      accumRef.current = lastEnd
+      segIdRef.current = m.segments.reduce((mx, s) => Math.max(mx, s.id), 0) + 1
+      setRestored(null)
+      setShowHistory(false)
+    },
+    [segments, title],
+  )
+
+  const removeMeeting = useCallback((id: string) => setHistory(deleteMeeting(id)), [])
 
   // --- derived --------------------------------------------------------------
   const filtered = useMemo(() => {
@@ -721,24 +789,109 @@ export default function App() {
           <span className="brand-mark">
             <Mic size={17} />
           </span>
-          <span className="wordmark">Meeting Transcriber</span>
+          <div className="brand-text">
+            <span className="wordmark">Meeting Transcriber</span>
+            <span className="tagline">Live captions for your meetings — private, on your device.</span>
+          </div>
         </div>
-        <div className="badges">
-          {cloud ? (
-            <>
-              <span className="badge ok">{gladia ? 'Cloud · Gladia live' : 'Cloud · large-v3'}</span>
-              <span className="badge warn">Audio leaves device</span>
-            </>
-          ) : (
-            <>
-              <span className={`badge ${activeDevice === 'webgpu' ? 'ok' : 'warn'}`}>
-                {activeDevice === 'webgpu' ? 'Fast · GPU' : 'CPU mode'}
-              </span>
-              <span className="badge">On-device</span>
-            </>
-          )}
+        <div className="topbar-right">
+          <div className="badges">
+            {cloud ? (
+              <>
+                <span className="badge ok">{gladia ? 'Cloud · Gladia live' : 'Cloud · large-v3'}</span>
+                <span className="badge warn">Audio leaves device</span>
+              </>
+            ) : (
+              <>
+                <span className={`badge ${activeDevice === 'webgpu' ? 'ok' : 'warn'}`}>
+                  {activeDevice === 'webgpu' ? 'Fast · GPU' : 'CPU mode'}
+                </span>
+                <span className="badge">On-device</span>
+              </>
+            )}
+          </div>
+          <div className="top-actions">
+            <button
+              className="icon-btn lg"
+              aria-label="How it works"
+              aria-pressed={showInfo}
+              onClick={() => {
+                setShowInfo((v) => !v)
+                setShowHistory(false)
+              }}
+            >
+              <Info size={18} />
+            </button>
+            <button
+              className="icon-btn lg"
+              aria-label="Past meetings"
+              aria-pressed={showHistory}
+              onClick={() => {
+                setShowHistory((v) => !v)
+                setShowInfo(false)
+              }}
+            >
+              <Clock size={18} />
+              {history.length > 0 && <span className="count-dot">{history.length}</span>}
+            </button>
+          </div>
         </div>
       </header>
+
+      {showInfo && (
+        <div className="sheet">
+          <div className="sheet-head">
+            <strong>How it works · is my data safe?</strong>
+            <button className="icon-btn" aria-label="Close" onClick={() => setShowInfo(false)}>
+              <Close size={16} />
+            </button>
+          </div>
+          <p>
+            This app turns meeting speech into live text in <strong>English and Bangla</strong>. In{' '}
+            <strong>On-device</strong> mode everything runs inside your browser — <strong>nothing you say leaves your
+            device</strong>, and it works offline after a one-time model download.
+          </p>
+          <p>
+            It can listen to your <strong>microphone</strong> (for in-person meetings) and to <strong>system / tab
+            audio</strong> (for Zoom, Meet, Teams — on a laptop). Transcripts autosave on this device and are kept in{' '}
+            <strong>Past meetings</strong>.
+          </p>
+          <p className="muted-note">
+            Tip: Bangla is hard for any free model, so expect some errors — you can fix the text in exports.{' '}
+            <strong>Cloud boost</strong> can be more accurate but sends audio to a provider.
+          </p>
+        </div>
+      )}
+
+      {showHistory && (
+        <div className="sheet">
+          <div className="sheet-head">
+            <strong>Past meetings</strong>
+            <button className="icon-btn" aria-label="Close" onClick={() => setShowHistory(false)}>
+              <Close size={16} />
+            </button>
+          </div>
+          {history.length === 0 ? (
+            <p className="muted-note">No saved meetings yet. When you Clear or start a new one, it's saved here.</p>
+          ) : (
+            <ul className="history-list">
+              {history.map((m) => (
+                <li key={m.id}>
+                  <button className="history-item" onClick={() => loadMeeting(m)}>
+                    <span className="history-title">{m.title || 'Untitled meeting'}</span>
+                    <span className="history-meta">
+                      {m.segments.length} segment{m.segments.length === 1 ? '' : 's'} · {relativeTime(m.savedAt)}
+                    </span>
+                  </button>
+                  <button className="icon-btn" aria-label="Delete meeting" onClick={() => removeMeeting(m.id)}>
+                    <Trash size={15} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {needRefresh && (
         <div className="banner update" role="status">
@@ -893,10 +1046,21 @@ export default function App() {
                   <input type="checkbox" checked={useMic} onChange={(e) => setUseMic(e.target.checked)} />
                   <span>Microphone (in-person)</span>
                 </label>
-                <label className="check">
-                  <input type="checkbox" checked={useSystem} onChange={(e) => setUseSystem(e.target.checked)} />
+                <label className={`check ${!systemSupported ? 'is-disabled' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={useSystem && systemSupported}
+                    disabled={!systemSupported}
+                    onChange={(e) => setUseSystem(e.target.checked)}
+                  />
                   <span>System / tab audio (Zoom, Meet…)</span>
                 </label>
+                {!systemSupported && (
+                  <p className="source-note">
+                    Tab/system audio capture isn’t available on phones — use a laptop for Zoom/Meet/Teams, or just the
+                    microphone for an in-person meeting.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -1027,6 +1191,20 @@ export default function App() {
       </section>
 
       <section className="transcript-wrap">
+        {(hasText || recording) && (
+          <div className="title-row">
+            <Pencil size={14} />
+            <input
+              className="title-input"
+              type="text"
+              placeholder="Untitled meeting — tap to name it"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={120}
+              aria-label="Meeting title"
+            />
+          </div>
+        )}
         {hasText && (
           <div className="search">
             <Search size={15} />
@@ -1082,6 +1260,9 @@ export default function App() {
             <p key={s.id} className="seg">
               <span className="ts">[{mmss(s.start)}]</span>
               <span className="seg-text">{query.trim() ? highlight(s.text, query.trim()) : s.text}</span>
+              <button className="seg-copy" aria-label="Copy this line" onClick={() => copyLine(s)}>
+                <Copy size={13} />
+              </button>
             </p>
           ))}
 
@@ -1117,13 +1298,21 @@ export default function App() {
           <Copy size={15} /> Copy
         </button>
         <details className="export" ref={exportRef}>
-          <summary aria-disabled={!hasText}>
+          <summary
+            className={!hasText ? 'is-disabled' : ''}
+            aria-disabled={!hasText}
+            onClick={(e) => {
+              if (!hasText) e.preventDefault()
+            }}
+          >
             <Download size={15} /> Export
           </summary>
           <div className="export-menu">
-            <button onClick={() => doExport('txt')}>Plain text (.txt)</button>
+            <button onClick={() => doExport('docx')}>Word document (.docx)</button>
             <button onClick={() => doExport('md')}>Markdown, timestamped (.md)</button>
+            <button onClick={() => doExport('txt')}>Plain text (.txt)</button>
             <button onClick={() => doExport('srt')}>Subtitles (.srt)</button>
+            <button onClick={() => doExport('vtt')}>Subtitles (.vtt)</button>
           </div>
         </details>
         <button onClick={clearAll} disabled={!hasText} className="danger-hover">

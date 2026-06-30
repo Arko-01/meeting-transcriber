@@ -885,6 +885,248 @@ mark {
   z-index: 20;
 }
 
+/* brand text + topbar actions ----------------------------------------------*/
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tagline {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.25;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.top-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.icon-btn.lg {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  opacity: 1;
+  cursor: pointer;
+}
+
+.icon-btn.lg:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.icon-btn.lg[aria-pressed='true'] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.1);
+}
+
+.count-dot {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  background: var(--accent2);
+  color: #04342c;
+  border-radius: 999px;
+  text-align: center;
+}
+
+/* info / history sheets -----------------------------------------------------*/
+.sheet {
+  background: linear-gradient(180deg, var(--panel2), var(--panel));
+  border: 1px solid var(--line2);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  animation: fadein 0.18s ease;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.sheet p {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text2);
+}
+
+.sheet p:last-child {
+  margin-bottom: 0;
+}
+
+.sheet strong {
+  color: var(--text);
+}
+
+.sheet .muted-note {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.sheet .muted-note strong {
+  color: var(--amber);
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.history-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-item {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 12px;
+  cursor: pointer;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-item:hover {
+  border-color: var(--accent);
+}
+
+.history-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* mobile audio-source note + disabled check ---------------------------------*/
+.source-note {
+  width: 100%;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--amber);
+  line-height: 1.5;
+}
+
+.check.is-disabled {
+  opacity: 0.5;
+}
+
+.check.is-disabled input {
+  cursor: not-allowed;
+}
+
+/* meeting title row ---------------------------------------------------------*/
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 9px 13px;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+
+.title-input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  outline: none;
+}
+
+.title-input::placeholder {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* per-line copy -------------------------------------------------------------*/
+.seg {
+  position: relative;
+  padding-right: 24px;
+}
+
+.seg-copy {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 5px;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.seg:hover .seg-copy {
+  opacity: 0.6;
+}
+
+.seg-copy:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+/* disabled export -----------------------------------------------------------*/
+.export summary.is-disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.export summary.is-disabled:hover {
+  border-color: var(--line);
+}
+
 /* touch + responsive -------------------------------------------------------*/
 @media (pointer: coarse) {
   .check {
@@ -894,8 +1136,13 @@ mark {
   .export summary,
   .settings select,
   .primary,
-  .ghost {
+  .ghost,
+  .icon-btn.lg {
     min-height: 44px;
+  }
+  /* no hover on touch — keep per-line copy visible */
+  .seg-copy {
+    opacity: 0.5;
   }
 }
 
@@ -903,11 +1150,40 @@ mark {
   .settings {
     grid-template-columns: 1fr;
   }
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .topbar-right {
+    justify-content: space-between;
+  }
+  .live-row {
+    gap: 10px 12px;
+  }
   .status-chip {
-    margin-left: 0;
+    margin-left: auto;
   }
   .live-buttons {
-    margin-left: auto;
+    margin-left: 0;
+    width: 100%;
+  }
+  .live-buttons .primary,
+  .live-buttons .ghost {
+    flex: 1;
+    justify-content: center;
+  }
+  /* keep the toolbar thumb-reachable during a long meeting */
+  .toolbar {
+    position: sticky;
+    bottom: 0;
+    z-index: 6;
+    flex-wrap: wrap;
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+    margin-top: 4px;
+    padding-top: 10px;
+    padding-bottom: max(4px, env(safe-area-inset-bottom));
   }
 }
 

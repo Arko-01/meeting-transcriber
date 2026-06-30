@@ -136,3 +136,25 @@ export const Key = ({ size = 15, className }: P) => (
     <path d="M11 12l9-9M17 6l2 2M14 9l2 2" />
   </svg>
 )
+
+export const Info = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <circle cx="12" cy="12" r="9" />
+    <line x1="12" y1="11" x2="12" y2="16" />
+    <circle cx="12" cy="8" r="0.6" fill="currentColor" />
+  </svg>
+)
+
+export const Clock = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+)
+
+export const Pencil = ({ size = 14, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M4 20h4l10-10-4-4L4 16z" />
+    <path d="M13.5 6.5l4 4" />
+  </svg>
+)
